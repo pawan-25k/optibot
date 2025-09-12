@@ -84,7 +84,7 @@ export default function Home() {
 
   // Create trip mutation
   const createTrip = useMutation({
-    mutationFn: async (tripData: { mode: string; distance: number; tokensEarned: number }) => {
+    mutationFn: async (tripData: { walletAddress: string; mode: string; distance: number; tokensEarned: number }) => {
       const response = await apiRequest('POST', '/api/trips', tripData);
       return response.json();
     },
@@ -211,7 +211,17 @@ export default function Home() {
     const distance = parseFloat(tripForm.distance);
     const tokensEarned = calculateTokens(tripForm.mode, distance);
     
+    if (!account) {
+      toast({
+        title: "Wallet not connected",
+        description: "Please connect your wallet first.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
     createTrip.mutate({
+      walletAddress: account,
       mode: tripForm.mode,
       distance,
       tokensEarned
