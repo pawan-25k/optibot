@@ -1,5 +1,7 @@
-import { type User, type InsertUser, type Trip, type InsertTrip } from "@shared/schema";
+import { type User, type InsertUser, type Trip, type InsertTrip, users, trips } from "@shared/schema";
 import { randomUUID } from "crypto";
+import { db } from "./db";
+import { eq, desc } from "drizzle-orm";
 
 export interface IStorage {
   // User methods
@@ -62,4 +64,69 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+export class DatabaseStorage implements IStorage {
+  // User methods
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByWalletAddress(walletAddress: string): Promise<User | undefined> {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.walletAddress, walletAddress.toLowerCase()));
+    return user || undefined;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    try {
+      // Attempt to insert, ignoring conflicts on unique wallet address
+      const [user] = await db
+        .insert(users)
+        .values({
+          ...insertUser,
+          walletAddress: insertUser.walletAddress.toLowerCase()
+        })
+        .onConflictDoNothing({ target: users.walletAddress })
+        .returning();
+      
+      // If no user returned due to conflict, fetch the existing user
+      if (user) {
+        return user;
+      } else {
+        const existingUser = await this.getUserByWalletAddress(insertUser.walletAddress);
+        if (existingUser) {
+          return existingUser;
+        }
+        throw new Error('Failed to create or retrieve user');
+      }
+    } catch (error) {
+      // Fallback: try to get existing user in case of any error
+      const existingUser = await this.getUserByWalletAddress(insertUser.walletAddress);
+      if (existingUser) {
+        return existingUser;
+      }
+      throw error;
+    }
+  }
+
+  // Trip methods
+  async createTrip(insertTrip: InsertTrip): Promise<Trip> {
+    const [trip] = await db
+      .insert(trips)
+      .values(insertTrip)
+      .returning();
+    return trip;
+  }
+
+  async getTripsByUserId(userId: string): Promise<Trip[]> {
+    return await db
+      .select()
+      .from(trips)
+      .where(eq(trips.userId, userId))
+      .orderBy(desc(trips.createdAt));
+  }
+}
+
+export const storage = new DatabaseStorage();
