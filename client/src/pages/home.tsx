@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { flushSync } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -67,6 +68,7 @@ export default function Home() {
   const [account, setAccount] = useState<string | null>(null);
   const [balance, setBalance] = useState<number>(0);
   const [loading, setLoading] = useState(false);
+  const [redeeming, setRedeeming] = useState(false);
   const [showTripModal, setShowTripModal] = useState(false);
   const [tripForm, setTripForm] = useState<TripForm>({
     mode: 'Walking',
@@ -231,22 +233,54 @@ export default function Home() {
     setTripForm({ mode: 'Walking', distance: '' });
   };
 
-  // Redeem reward
+  // Atomic redeem reward to prevent race conditions
   const redeemReward = (reward: typeof REWARDS[0]) => {
-    if (balance >= reward.cost) {
-      setBalance(prev => prev - reward.cost);
+    console.log(`Attempting to redeem: ${reward.title} (ID: ${reward.id}) for ${reward.cost} GTN`);
+    console.log(`Current balance: ${balance} GTN, redeeming: ${redeeming}`);
+    
+    // Prevent concurrent redemptions
+    if (redeeming) {
+      console.log('Redemption already in progress, skipping');
+      return;
+    }
+    
+    const oldBalance = balance;
+    setRedeeming(true);
+    
+    // Use flushSync to make the balance update atomic
+    let newBalance = oldBalance; // Initialize to current balance
+    flushSync(() => {
+      setBalance(prev => {
+        if (prev >= reward.cost) {
+          newBalance = prev - reward.cost;
+          console.log(`Deducting ${reward.cost} GTN. New balance: ${newBalance} GTN`);
+          return newBalance;
+        } else {
+          newBalance = prev;
+          console.log(`Insufficient balance for reward: ${reward.title}`);
+          return prev;
+        }
+      });
+    });
+    
+    // Show appropriate toast based on the actual result
+    if (newBalance < oldBalance) {
       const couponCode = `BENGALURU-GREEN-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
       toast({
         title: "Success!",
         description: `Your coupon code is ${couponCode}`,
+        duration: 4000,
       });
     } else {
       toast({
         title: "Insufficient balance",
         description: "You don't have enough GTN to redeem this reward.",
         variant: "destructive",
+        duration: 4000,
       });
     }
+    
+    setRedeeming(false);
   };
 
   return (
@@ -440,11 +474,11 @@ export default function Home() {
                           <span className="font-bold text-primary">{reward.cost} GTN</span>
                           <Button
                             onClick={() => redeemReward(reward)}
-                            disabled={balance < reward.cost}
+                            disabled={redeeming}
                             size="sm"
-                            className={balance >= reward.cost 
+                            className={(balance >= reward.cost && !redeeming)
                               ? 'bg-primary hover:bg-primary/90 text-primary-foreground'
-                              : 'bg-muted text-muted-foreground cursor-not-allowed'
+                              : 'bg-muted text-muted-foreground hover:bg-muted'
                             }
                             data-testid={`button-redeem-${reward.id}`}
                           >
