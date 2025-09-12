@@ -22,7 +22,9 @@ declare global {
 const CONTRACT_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
   "function name() view returns (string)",
-  "function symbol() view returns (string)"
+  "function symbol() view returns (string)",
+  "function mint(address to, uint256 amount) external returns (bool)",
+  "function transfer(address to, uint256 amount) external returns (bool)"
 ];
 
 const CONTRACT_ADDRESS = "0xc68769c2f8e4e7ebf6810691632ce6a1b676c16d";
@@ -69,6 +71,8 @@ export default function Home() {
   const [balance, setBalance] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [redeeming, setRedeeming] = useState(false);
+  const [minting, setMinting] = useState(false);
+  const [provider, setProvider] = useState<any>(null);
   const [showTripModal, setShowTripModal] = useState(false);
   const [tripForm, setTripForm] = useState<TripForm>({
     mode: 'Walking',
@@ -92,10 +96,10 @@ export default function Home() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['/api/trips'] });
-      setBalance(prev => prev + data.tokensEarned);
+      // Balance is updated from blockchain refetch - no local increment needed
       toast({
         title: "Trip logged!",
-        description: `You've earned ${data.tokensEarned} GTN!`,
+        description: `Trip saved to database successfully!`,
       });
     },
     onError: () => {
@@ -158,6 +162,7 @@ export default function Home() {
         const address = await signer.getAddress();
         
         setAccount(address);
+        setProvider(provider); // Store provider for minting operations
         
         // Fetch balance from contract
         await fetchBalance(provider, address);
@@ -188,19 +193,61 @@ export default function Home() {
   // Fetch GTN balance from contract
   const fetchBalance = async (provider: any, address: string) => {
     try {
-      const { ethers } = await import('ethers');
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+      const { Contract, formatUnits } = await import('ethers');
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
       const balance = await contract.balanceOf(address);
-      setBalance(parseInt(balance.toString()));
+      // Convert from wei to human readable (assume 18 decimals)
+      const formattedBalance = formatUnits(balance, 18);
+      setBalance(parseInt(formattedBalance));
     } catch (error) {
       console.error('Failed to fetch balance:', error);
-      // For demo purposes, set a mock balance if contract call fails
-      setBalance(125);
+      // Keep previous balance - no fake balance on error
+      toast({
+        title: "Balance update failed",
+        description: "Could not fetch balance from blockchain",
+        variant: "destructive",
+      });
     }
   };
 
-  // Submit new trip
-  const submitTrip = () => {
+  // Mint tokens on blockchain for earned GTN
+  const mintTokens = async (provider: any, address: string, amount: number) => {
+    try {
+      const { BrowserProvider, Contract, parseUnits } = await import('ethers');
+      
+      // Convert to proper token units (assume 18 decimals for GTN)
+      const tokenAmount = parseUnits(amount.toString(), 18);
+      
+      const signer = await provider.getSigner();
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      
+      console.log(`Attempting to mint ${amount} GTN tokens (${tokenAmount.toString()} wei) to ${address}`);
+      
+      // Send mint transaction
+      const tx = await contract.mint(address, tokenAmount);
+      console.log('Mint transaction sent:', tx.hash);
+      
+      // Wait for transaction confirmation
+      const receipt = await tx.wait();
+      console.log('Mint transaction confirmed:', receipt.transactionHash);
+      
+      return { success: true, txHash: receipt.transactionHash };
+    } catch (error) {
+      console.error('Failed to mint tokens:', error);
+      
+      // Return failure - no simulated success to prevent fraud
+      throw new Error(`Token minting failed: ${error.message || error}`);
+    }
+  };
+
+  // Submit new trip with blockchain minting
+  const submitTrip = async () => {
+    // Prevent re-entrancy during minting
+    if (minting) {
+      console.log('Already minting, ignoring duplicate submission');
+      return;
+    }
+
     if (!tripForm.distance || parseFloat(tripForm.distance) <= 0) {
       toast({
         title: "Invalid distance",
@@ -221,16 +268,58 @@ export default function Home() {
       });
       return;
     }
-    
-    createTrip.mutate({
-      walletAddress: account,
-      mode: tripForm.mode,
-      distance,
-      tokensEarned
-    });
 
-    setShowTripModal(false);
-    setTripForm({ mode: 'Walking', distance: '' });
+    setMinting(true);
+    
+    try {
+      // Step 1: Mint tokens on blockchain (MUST succeed)
+      if (provider && tokensEarned > 0) {
+        console.log(`Starting token minting for trip: ${tripForm.mode}, ${distance}km, ${tokensEarned} GTN`);
+        const mintResult = await mintTokens(provider, account, tokensEarned);
+        
+        console.log('Token minting successful:', mintResult);
+        
+        // Step 2: Refetch balance from blockchain (no local increment)
+        await fetchBalance(provider, account);
+        
+        // Step 3: Save trip to database ONLY after successful minting
+        createTrip.mutate({
+          walletAddress: account,
+          mode: tripForm.mode,
+          distance,
+          tokensEarned
+        });
+
+        // Show success toast with blockchain confirmation
+        toast({
+          title: "Tokens minted successfully!",
+          description: `Earned ${tokensEarned} GTN. Transaction: ${mintResult.txHash.slice(0, 10)}...`,
+          duration: 4000,
+        });
+
+        setShowTripModal(false);
+        setTripForm({ mode: 'Walking', distance: '' });
+      } else {
+        throw new Error('No provider available or no tokens to mint');
+      }
+      
+    } catch (error) {
+      console.error('Error during trip submission:', error);
+      
+      // Distinguish between minting errors and other errors
+      const errorMessage = error.message?.includes('Token minting failed') 
+        ? `Blockchain minting failed: ${error.message}`
+        : 'There was an error logging your trip. Please try again.';
+      
+      toast({
+        title: "Trip submission failed",
+        description: errorMessage,
+        variant: "destructive",
+        duration: 4000,
+      });
+    } finally {
+      setMinting(false);
+    }
   };
 
   // Atomic redeem reward to prevent race conditions
@@ -551,11 +640,11 @@ export default function Home() {
             </Button>
             <Button
               onClick={submitTrip}
-              disabled={createTrip.isPending}
+              disabled={minting || createTrip.isPending}
               className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground"
               data-testid="button-submit-trip"
             >
-              {createTrip.isPending ? 'Submitting...' : 'Submit Trip'}
+              {minting ? 'Minting Tokens...' : createTrip.isPending ? 'Submitting...' : 'Submit Trip'}
             </Button>
           </div>
         </DialogContent>
